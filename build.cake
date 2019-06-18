@@ -41,8 +41,36 @@ Task("Test")
     .Does(() => {
         // BOTHS WORKS
         //DotNetCoreTest(Paths.TestProjectFile.FullPath);
-        DotNetCoreTest(Paths.SolutionFile.FullPath);
+        DotNetCoreTest(Paths.SolutionFile.FullPath, new DotNetCoreTestSettings {
+            Logger = "trx", // VSTest results format
+            ResultsDirectory = Paths.TestResultsDirectory
+        });
     });
+
+Task("Publish-Test-Results-AzurePipelines")
+    .WithCriteria(BuildSystem.IsRunningOnAzurePipelinesHosted)
+    .IsDependentOn("Test")
+    .Does(() => {
+        TFBuild.Commands.PublishTestResults(new TFBuildPublishTestResultsData {
+            TestRunner = TFTestRunnerType.VSTest,
+            TestResultsFiles = GetFiles(Paths.TestResultsDirectory + "/*.trx").ToList()
+        });
+    });
+
+Task("Publish-Test-Results-TeamCity")
+    .WithCriteria(BuildSystem.IsRunningOnTeamCity)
+    .IsDependentOn("Test")
+    .Does(() => {
+        foreach (var testResult in GetFiles(Paths.TestResultsDirectory + "/*.trx"))
+        {
+            TeamCity.ImportData("vstest", testResult.FullPath);
+        }
+    });
+
+
+Task("Publish-Test-Results")
+    .IsDependentOn("Publish-Test-Results-TeamCity")
+    .IsDependentOn("Publish-Test-Results-AzurePipelines");
 
 Task("Version")
     .Does<PackageMetadata>(package => {
@@ -157,5 +185,61 @@ Task("Deploy-Octopus")
                 WaitForDeployment = true
             });
     });
+
+Task("Set-Build-Number-TeamCity")
+    .WithCriteria(BuildSystem.IsRunningOnTeamCity)
+    .IsDependentOn("Version")
+    .Does<PackageMetadata>(package => {
+        var buildNumber = TeamCity.Environment.Build.Number;
+        TeamCity.SetBuildNumber($"{package.Version}+{buildNumber}");
+    });
+Task("Set-Build-Number-AzurePipelines")
+    .WithCriteria(BuildSystem.IsRunningOnAzurePipelinesHosted)
+    .IsDependentOn("Version")
+    .Does<PackageMetadata>(package => {
+        var buildNumber = TFBuild.Environment.Build.Number;
+        TFBuild.Commands.UpdateBuildNumber($"{package.Version}+{buildNumber}");
+    });
+Task("Set-Build-Number")
+    .IsDependentOn("Set-Build-Number-TeamCity")
+    .IsDependentOn("Set-Build-Number-AzurePipelines");
+
+Task("Publish-Build-Artifact-TeamCity")
+    .WithCriteria(BuildSystem.IsRunningOnTeamCity)
+    .IsDependentOn("Package-Zip")
+    .Does<PackageMetadata>(package => {
+        // Output directory is cleared before, so no bullshit in it
+        //TeamCity.PublishArtifacts(package.OutputDirectory.FullPath);
+
+        //OR
+        foreach (var artifact in GetFiles(package.OutputDirectory + $"/*.{package.Extension}"))
+        {
+            TeamCity.PublishArtifacts(artifact.FullPath);
+        }
+    });
+
+Task("Publish-Build-Artifact-AzurePipelines")
+    .WithCriteria(BuildSystem.IsRunningOnAzurePipelinesHosted)
+    .IsDependentOn("Package-Zip")
+    .Does<PackageMetadata>(package => {
+        // Output directory is cleared before, so no bullshit in it
+        TFBuild.Commands.UploadArtifactDirectory(package.OutputDirectory);
+    });
+Task("Publish-Build-Artifact")
+    .WithCriteria(!BuildSystem.IsLocalBuild)
+    .IsDependentOn("Publish-Build-Artifact-TeamCity")
+    .IsDependentOn("Publish-Build-Artifact-AzurePipelines");
+
+
+Task("Build-CI")
+    .IsDependentOn("Compile")
+    .IsDependentOn("Test")
+    .IsDependentOn("Build-Frontend")
+    .IsDependentOn("Version")
+    .IsDependentOn("Package-Zip")
+    .IsDependentOn("Set-Build-Number")
+    .IsDependentOn("Publish-Build-Artifact")
+    .IsDependentOn("Publish-Test-Results");
+
 
 RunTarget(target);
